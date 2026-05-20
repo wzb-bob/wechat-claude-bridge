@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+account.json
+last_user.json
+sync-buf.txt
+chat_history.jsonl
+*.log
+/tmp/

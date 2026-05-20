@@ -1,0 +1,15 @@
+#!/bin/bash
+# 微信通知助手 — 从任意位置推送消息到用户微信
+# 用法: wxnotify "消息内容"
+#       wxnotify -p 股票 "构建成功"
+#       echo "消息" | wxnotify -i
+
+SCRIPT="C:/Users/wangzibo/Desktop/wechat_notify.py"
+PYTHON="C:/Users/wangzibo/AppData/Local/Programs/Python/Python312/python.exe"
+
+if [ $# -eq 0 ]; then
+    echo "用法: wxnotify [-p 项目名] 消息内容"
+    exit 1
+fi
+
+"$PYTHON" "$SCRIPT" "$@"

@@ -434,8 +434,8 @@ SYSTEM_PROMPT = f"""你是通过微信操作的智能编码助手，管理多个
 - 体态: C:/Users/wangzibo/bodyfat-miniprogram/bodyfit-android (体态分析Android)
 - 体脂: C:/Users/wangzibo/bodyfat-miniprogram (体脂率小程序)
 - 论文: C:/Users/wangzibo/thesis-workspace (轴向磁通电机论文)
-- 短剧: C:/Users/wangzibo/skills/short-drama-ad-maker (AI短剧广告)
-- VFX: C:/Users/wangzibo/bodyfat-miniprogram/bodyfit-android (VFX App制作)
+- 短剧: C:/Users/wangzibo/.claude/skills/short-drama-ad-maker (AI短剧广告)
+- VFX: C:/Users/wangzibo/rap-mv-scene/vfx-studio (VFX App制作)
 
 工具：
 - list_files(path): 列出目录内容

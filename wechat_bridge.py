@@ -15,8 +15,32 @@ TOKEN = acc["token"]
 BASE_URL = acc["baseUrl"]
 
 API_URL = "https://api.deepseek.com/anthropic/v1/messages"
-API_KEY = "sk-f630b4f823fe4941aac50ba1254a51d9"
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 API_MODEL = "deepseek-v4-pro"
+
+if not API_KEY:
+    print("[致命错误] 请设置环境变量 DEEPSEEK_API_KEY", flush=True)
+    print("  set DEEPSEEK_API_KEY=你的DeepSeek密钥", flush=True)
+    sys.exit(1)
+
+if not TOKEN:
+    print("[致命错误] account.json 中缺少 token", flush=True)
+    sys.exit(1)
+
+# HTTP 连接池（复用连接，减少 TCP 握手）
+_ilink_session = requests.Session()
+_ilink_session.headers.update({
+    "Authorization": f"Bearer {TOKEN}",
+    "AuthorizationType": "ilink_bot_token",
+    "X-WECHAT-UIN": "dGVzdA==",
+    "Content-Type": "application/json"
+})
+_ds_session = requests.Session()
+_ds_session.headers.update({
+    "x-api-key": API_KEY,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json"
+})
 
 WORK_DIR = os.path.expanduser("~")
 CDN_UPLOAD_URL = "https://novac2c.cdn.weixin.qq.com/c2c/upload"
@@ -171,8 +195,8 @@ def upload_and_send_file(to_user: str, file_path: str, context_token: str) -> st
         return f"[错误] 不是文件: {file_path}"
 
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    if file_size_mb > 100:
-        return f"[错误] 文件过大: {file_size_mb:.1f}MB (上限 100MB)"
+    if file_size_mb > 25:
+        return f"[错误] 文件过大: {file_size_mb:.1f}MB (微信上限 25MB)"
 
     try:
         # 1. 读取文件，计算 MD5
@@ -202,18 +226,10 @@ def upload_and_send_file(to_user: str, file_path: str, context_token: str) -> st
 
     print(f"  [upload] {file_name} ({raw_size} bytes, mime={mime}, item_type={item_type})", flush=True)
 
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "AuthorizationType": "ilink_bot_token",
-        "X-WECHAT-UIN": "dGVzdA==",
-        "Content-Type": "application/json"
-    }
-
     # 2. 获取上传 URL
     try:
-        resp = requests.post(
+        resp = _ilink_session.post(
             f"{BASE_URL}/ilink/bot/getuploadurl",
-            headers=headers,
             json={
                 "filekey": filekey,
                 "media_type": media_type,
@@ -273,9 +289,8 @@ def upload_and_send_file(to_user: str, file_path: str, context_token: str) -> st
 
     client_id = f"cc-py-{secrets.token_hex(4)}"
     try:
-        resp = requests.post(
+        resp = _ilink_session.post(
             f"{BASE_URL}/ilink/bot/sendmessage",
-            headers=headers,
             json={
                 "msg": {
                     "from_user_id": "",
@@ -491,6 +506,17 @@ SAFE_COMMANDS = ["dir ", "type ", "findstr ", "where ", "netstat ", "tasklist ",
 # 待审批的操作 {request_id: {user_id, ctx, command, timestamp}}
 _pending_permissions = {}
 _perm_lock = threading.Lock()
+APPROVAL_TIMEOUT = 300  # 5分钟过期
+
+
+def prune_expired_permissions():
+    """清理过期的审批请求"""
+    now = time.time()
+    with _perm_lock:
+        expired = [rid for rid, p in _pending_permissions.items()
+                   if now - p.get("timestamp", 0) > APPROVAL_TIMEOUT]
+        for rid in expired:
+            del _pending_permissions[rid]
 
 
 def is_safe_command(cmd):
@@ -506,6 +532,8 @@ def execute_tool(name, inputs, context_token=""):
     try:
         if name == "list_files":
             path = resolve_path(inputs.get("path", "."))
+            if not is_safe_path(path):
+                return f"[安全阻止] 路径超出允许范围: {path}"
             pattern = inputs.get("pattern", "")
             if not os.path.exists(path):
                 return f"[错误] 路径不存在: {path}"
@@ -530,6 +558,8 @@ def execute_tool(name, inputs, context_token=""):
 
         elif name == "read_file":
             path = resolve_path(inputs["path"])
+            if not is_safe_path(path):
+                return f"[安全阻止] 路径超出允许范围: {path}"
             if not os.path.exists(path):
                 return f"[错误] 文件不存在: {path}"
             if not os.path.isfile(path):
@@ -552,6 +582,8 @@ def execute_tool(name, inputs, context_token=""):
 
         elif name == "write_file":
             path = resolve_path(inputs["path"])
+            if not is_safe_path(path):
+                return f"[安全阻止] 路径超出允许范围: {path}"
             content = inputs["content"]
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -573,7 +605,7 @@ def execute_tool(name, inputs, context_token=""):
                 req_id = secrets.token_hex(3)[:5]
                 with _perm_lock:
                     _pending_permissions[req_id] = {
-                        "user_id": context_token,  # 这里 context_token 参数暂不可用
+                        "user_id": "",  # 稍后由 ask_claude 回填
                         "cmd": cmd,
                         "timestamp": time.time()
                     }
@@ -599,16 +631,28 @@ def execute_tool(name, inputs, context_token=""):
         elif name == "search_content":
             pattern = inputs["pattern"]
             path = resolve_path(inputs.get("path", "."))
+            if not is_safe_path(path):
+                return f"[安全阻止] 路径超出允许范围: {path}"
             file_types = inputs.get("file_types", "")
             if not os.path.isdir(path):
                 return f"[错误] 不是目录: {path}"
             matches = []
             exts = [e.strip() for e in file_types.split(",") if e.strip()] if file_types else None
+            BINARY_EXTENSIONS = {'.pyc', '.pyo', '.exe', '.dll', '.pdb', '.obj', '.lib',
+                                 '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+                                 '.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.flac',
+                                 '.zip', '.rar', '.7z', '.tar', '.gz', '.pdf',
+                                 '.class', '.jar', '.o', '.a', '.so', '.wasm',
+                                 '.ttf', '.otf', '.woff', '.woff2', '.eot',
+                                 '.bin', '.dat', '.db', '.sqlite', '.sqlite3'}
             import fnmatch as fm
             for root, dirs, files in os.walk(path):
                 dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
                 for fname in files:
                     if exts and not any(fname.endswith(ext) for ext in exts):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in BINARY_EXTENSIONS:
                         continue
                     fpath = os.path.join(root, fname)
                     try:
@@ -630,21 +674,34 @@ def execute_tool(name, inputs, context_token=""):
 
         elif name == "edit_file":
             path = resolve_path(inputs["path"])
+            if not is_safe_path(path):
+                return f"[安全阻止] 路径超出允许范围: {path}"
             old = inputs["old_string"]
             new = inputs["new_string"]
             if not os.path.exists(path):
                 return f"[错误] 文件不存在: {path}"
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
+            encodings = ["utf-8", "gbk", "latin-1"]
+            detected_enc = None
+            content = None
+            for enc in encodings:
+                try:
+                    with open(path, "r", encoding=enc) as f:
+                        content = f.read()
+                    detected_enc = enc
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if content is None:
+                return "[错误] 无法解码文件"
             count = content.count(old)
             if count == 0:
                 return f"[错误] 文本未找到: '{old[:80]}'"
             if count > 1:
                 return f"[错误] 文本匹配了 {count} 处（必须唯一）: '{old[:80]}'"
             content = content.replace(old, new)
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding=detected_enc) as f:
                 f.write(content)
-            return f"[成功] {path} 已编辑"
+            return f"[成功] {path} 已编辑 (编码: {detected_enc})"
 
         elif name == "send_file":
             path = resolve_path(inputs["path"])
@@ -672,14 +729,7 @@ def ask_claude(text, conversation_history=None, user_id=None, ctx=""):
 
     messages.append({"role": "user", "content": text})
 
-    headers = {
-        "x-api-key": API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json"
-    }
-
     tool_call_count = 0
-    pending_sendfile = None  # 记录 send_file 请求
 
     while True:
         body = {
@@ -690,7 +740,7 @@ def ask_claude(text, conversation_history=None, user_id=None, ctx=""):
             "tools": TOOLS
         }
 
-        resp = requests.post(API_URL, headers=headers, json=body, timeout=90)
+        resp = _ds_session.post(API_URL, json=body, timeout=90)
         if not resp.ok:
             return f"[API错误 HTTP {resp.status_code}] {resp.text[:300]}"
 
@@ -745,8 +795,8 @@ def ask_claude(text, conversation_history=None, user_id=None, ctx=""):
             print(f"  [tool] {tool_name}({json.dumps(tool_input, ensure_ascii=False)[:100]})", flush=True)
 
             if tool_name == "send_file":
-                result = f"[SENDFILE]{resolve_path(tool_input.get('path', ''))}"
-                pending_sendfile = result
+                path = resolve_path(tool_input.get('path', ''))
+                result = upload_and_send_file(user_id, path, ctx) if user_id and ctx else "[错误] 缺少用户上下文"
             else:
                 result = execute_tool(tool_name, tool_input)
                 # 审批请求：立即发微信通知
@@ -756,7 +806,6 @@ def ask_claude(text, conversation_history=None, user_id=None, ctx=""):
                     cmd = parts[2].split("=")[1] if len(parts) > 2 else "unknown"
                     approve_msg = f"Claude 想执行命令:\n{cmd[:150]}\n\n回复 yes {req_id} 批准\n回复 no {req_id} 拒绝"
                     send_message(user_id, approve_msg, ctx)
-                    # 保存 user_id 和 ctx 到 pending
                     with _perm_lock:
                         if req_id in _pending_permissions:
                             _pending_permissions[req_id]["user_id"] = user_id
@@ -771,19 +820,6 @@ def ask_claude(text, conversation_history=None, user_id=None, ctx=""):
 
         messages.append({"role": "user", "content": tool_results})
 
-        # 如果有 sendfile 请求，立即执行并继续循环(让模型知道结果)
-        if pending_sendfile:
-            file_path = pending_sendfile.replace("[SENDFILE]", "")
-            send_result = upload_and_send_file(user_id, file_path, ctx) if user_id and ctx else "[错误] 缺少用户上下文"
-            print(f"  [sendfile] {send_result}", flush=True)
-            messages.append({"role": "user", "content": [{
-                "type": "tool_result",
-                "tool_use_id": tool_results[-1]["tool_use_id"],
-                "content": send_result + "\n\n请继续你的回复，告知用户文件发送结果。"
-            }]})
-            pending_sendfile = None
-            continue
-
         # 4. 安全检查
         tool_call_count += 1
         if tool_call_count >= 50:
@@ -791,9 +827,9 @@ def ask_claude(text, conversation_history=None, user_id=None, ctx=""):
                 send_message(user_id, "已达到最大操作步数(50)，请简化你的请求。", ctx)
             return "[已达最大操作步数]"
 
-        # 防止消息过长（超过 API 上下文限制时截断）
-        if len(messages) > 40:
-            messages[:] = messages[-30:]
+        # 滑动窗口：消息接近上限时保留首条+最新消息
+        if len(messages) > 36:
+            messages[:] = messages[:1] + messages[-30:]
 
 
 # ======================== iLink 消息收发 ========================
@@ -815,14 +851,8 @@ def send_message(user_id, text, context_token=""):
         },
         "base_info": {"channel_version": "0.1.0"}
     })
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "AuthorizationType": "ilink_bot_token",
-        "X-WECHAT-UIN": "dGVzdA==",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(f"{BASE_URL}/ilink/bot/sendmessage",
-                         headers=headers, data=body, timeout=10)
+    resp = _ilink_session.post(f"{BASE_URL}/ilink/bot/sendmessage",
+                                data=body, timeout=10)
     return resp.json()
 
 
@@ -847,13 +877,6 @@ def extract_text(msg):
 
 # ======================== 主循环 ========================
 
-headers = {
-    "Authorization": f"Bearer {TOKEN}",
-    "AuthorizationType": "ilink_bot_token",
-    "X-WECHAT-UIN": "dGVzdA==",
-    "Content-Type": "application/json"
-}
-
 sync_buf = ""
 # 每个用户的对话历史 {user_id: [messages]}
 conversations = {}
@@ -862,14 +885,15 @@ MAX_HISTORY = 20
 print("=== Running (v6 with notification relay + multi-project) ===\n", flush=True)
 
 while True:
+    prune_expired_permissions()
     try:
         body = json.dumps({
             "base_info": {"channel_version": "0.1.0"},
             "bot_type": "3",
             "get_updates_buf": sync_buf
         })
-        resp = requests.post(f"{BASE_URL}/ilink/bot/getupdates",
-                             headers=headers, data=body, timeout=40)
+        resp = _ilink_session.post(f"{BASE_URL}/ilink/bot/getupdates",
+                                    data=body, timeout=40)
         data = resp.json()
 
         if data.get("get_updates_buf"):
@@ -896,6 +920,10 @@ while True:
                 req_id = perm_match.group(2).lower()
                 with _perm_lock:
                     pending = _pending_permissions.pop(req_id, None)
+                if pending and pending.get("user_id") and pending["user_id"] != user_id:
+                    _pending_permissions[req_id] = pending  # 放回
+                    send_message(user_id, "[权限错误] 这不是你的审批请求", ctx)
+                    continue
                 if pending:
                     if action == "allow":
                         print(f"  [审批通过] {req_id}: {pending['cmd'][:80]}", flush=True)
@@ -924,7 +952,7 @@ while True:
             # 获取或创建该用户的对话历史（按用户+项目分上下文）
             # 支持 @项目名 切换项目上下文
             project_key = "__全局__"
-            for proj in ["股票", "体态", "体脂", "论文", "短剧", "vfx", "VFX", "测量学", "挡土墙"]:
+            for proj in ["股票", "体态", "体脂", "论文", "短剧", "vfx", "VFX"]:
                 if proj in text:
                     project_key = proj
                     break
@@ -985,7 +1013,8 @@ while True:
                 result = send_message(user_id, reply, ctx)
                 print(f"  -> sent: {result}", flush=True)
 
-        time.sleep(1)
+        had_messages = len(data.get("msgs", [])) > 0
+        time.sleep(0.1 if had_messages else 1)
 
     except requests.exceptions.Timeout:
         continue

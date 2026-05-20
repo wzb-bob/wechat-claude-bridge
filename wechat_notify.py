@@ -5,57 +5,12 @@
   python wechat_notify.py --project stocklite "消息内容"
   echo "消息" | python wechat_notify.py --pipe
 """
-import requests, json, os, sys, time, secrets
+import os, sys
 
-ACCOUNT_FILE = os.path.expanduser(r"~\.claude\channels\wechat\default\account.json")
-LAST_USER_FILE = os.path.expanduser(r"~\.claude\channels\wechat\default\last_user.json")
-
-# 读账户
-with open(ACCOUNT_FILE) as f:
-    acc = json.load(f)
-
-TOKEN = acc["token"]
-BASE_URL = acc["baseUrl"]
-
-# 读最新用户上下文
-user_id = None
-ctx = None
-try:
-    if os.path.exists(LAST_USER_FILE):
-        with open(LAST_USER_FILE) as f:
-            d = json.load(f)
-            user_id = d.get("user_id")
-            ctx = d.get("ctx")
-except Exception:
-    pass
-
-
-def send_text(to_user: str, text: str, context_token: str) -> dict:
-    """通过 iLink API 发送文本消息"""
-    client_id = f"cc-notify-{secrets.token_hex(4)}"
-    body = json.dumps({
-        "msg": {
-            "from_user_id": "",
-            "to_user_id": to_user,
-            "client_id": client_id,
-            "message_type": 2,
-            "message_state": 2,
-            "item_list": [
-                {"type": 1, "text_item": {"text": text}}
-            ],
-            "context_token": context_token,
-        },
-        "base_info": {"channel_version": "0.1.0"}
-    })
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "AuthorizationType": "ilink_bot_token",
-        "X-WECHAT-UIN": "dGVzdA==",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(f"{BASE_URL}/ilink/bot/sendmessage",
-                         headers=headers, data=body, timeout=10)
-    return resp.json()
+# 将 repo 目录加入 path，以便导入 notify_relay
+REPO_DIR = r"C:\Users\wangzibo\wechat-claude-bridge"
+sys.path.insert(0, REPO_DIR)
+import notify_relay
 
 
 if __name__ == "__main__":
@@ -75,10 +30,6 @@ if __name__ == "__main__":
         print("错误: 消息不能为空", file=sys.stderr)
         sys.exit(1)
 
-    if not user_id or not ctx:
-        print("错误: 尚无用户上下文（需要先在微信上给 bot 发一条消息）", file=sys.stderr)
-        sys.exit(1)
-
     # 加项目标签
     prefix = f"【{args.project}】" if args.project else ""
     full_text = f"{prefix}{text}"
@@ -87,9 +38,13 @@ if __name__ == "__main__":
     if len(full_text) > 1800:
         full_text = full_text[:1780] + "\n...(已截断)"
 
-    result = send_text(user_id, full_text, ctx)
-    if result.get("ret", 0) == 0:
+    if not notify_relay.bridge_is_running():
+        print("错误: 桥接未运行（请先启动 start-wechat-py-bridge.bat）", file=sys.stderr)
+        sys.exit(1)
+
+    ok = notify_relay.send_via_relay(full_text)
+    if ok:
         print(f"已发送: {full_text[:80]}...")
     else:
-        print(f"发送失败: {result}", file=sys.stderr)
+        print("发送失败", file=sys.stderr)
         sys.exit(1)

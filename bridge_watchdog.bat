@@ -18,4 +18,6 @@ if %errorlevel% equ 0 exit /b 0
 
 REM 桥接已断开，重新启动
 echo [%date% %time%] 桥接断开，重新启动... >> "%LOGFILE%"
+REM 确保 API 密钥环境变量（用于 DeepSeek API）
+if not defined DEEPSEEK_API_KEY set "DEEPSEEK_API_KEY=sk-f630b4f823fe4941aac50ba1254a51d9"
 start /b "" "%PYTHON%" "%BRIDGE%" >> "%LOGFILE%" 2>&1

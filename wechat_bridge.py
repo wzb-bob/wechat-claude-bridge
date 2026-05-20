@@ -15,12 +15,12 @@ TOKEN = acc["token"]
 BASE_URL = acc["baseUrl"]
 
 API_URL = "https://api.deepseek.com/anthropic/v1/messages"
-API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "") or acc.get("deepseek_api_key", "")
 API_MODEL = "deepseek-v4-pro"
 
 if not API_KEY:
-    print("[致命错误] 请设置环境变量 DEEPSEEK_API_KEY", flush=True)
-    print("  set DEEPSEEK_API_KEY=你的DeepSeek密钥", flush=True)
+    print("[致命错误] 请设置环境变量 DEEPSEEK_API_KEY 或在 account.json 中添加 deepseek_api_key", flush=True)
+    print("  setx DEEPSEEK_API_KEY \"你的DeepSeek密钥\"", flush=True)
     sys.exit(1)
 
 if not TOKEN:
